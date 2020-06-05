@@ -1,0 +1,106 @@
+---
+title: "OOTP and Race"
+author: "Jason Willwerscheid"
+date: "6/4/2020"
+output:
+  workflowr::wflow_html:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE, comment = "#>", warning = FALSE)
+library(tidyverse)
+```
+
+## Facial Types
+
+```{r players}
+suppressMessages(players <- readr::read_csv("data/players.csv"))
+players <- players %>%
+  select(last_name = LastName, first_name = FirstName,
+         nation = Nation, facial_type,
+         greed, loyalty, work_ethic, intelligence, leader = `leader ability`,
+         ml_service = `ML Service`)
+players <- players %>% mutate(facial_type = as.factor(facial_type))
+```
+
+In the OOTP database, race is most immediately coded as "facial type." This variable is primarily used, I think, to create players' "facegens" (profile pictures). From inspection, level 1 appears to correspond to Black (including Black Latino), 2 to East Asian, 3 to Pacific Islander, 4 to White, and 5 to Latino. In general, the labels are pretty noisy. For example, Kolten Wong is coded as White while his brother Kean is coded as East Asian. Overall, there are very few players coded as East Asian and even fewer as Pacific Islander, so I filter them out for the purposes of this analysis.
+
+```{r face}
+players <- players %>%
+  filter(facial_type %in% c(1, 4, 5)) %>%
+  mutate(facial_type = droplevels(fct_recode(facial_type, black = "1", white = "4", latino = "5")))
+```
+
+## Personality
+
+I'll focus on the five personality traits that have the most visible effects within the game: greed, loyalty, work ethic, intelligence, and leadership. Behind the scenes, each of these is scored on a scale from 0 to 200.
+
+I plot density histograms for each trait below. It seems clear that a larger proportion of Whites have high scores for intelligence, work ethic, leadership, and loyalty.
+
+```{r person}
+df <- players %>%
+  gather(key = "trait", value = "score", greed:leader)
+ggplot(df, aes(x = score, col = facial_type)) + geom_density() + facet_wrap(~trait)
+```
+
+## Significance Tests
+
+These visual impressions are supported by significance tests. I do a very simple test in which I aggregate Blacks and Latinos and do a two-sample $t$-test to check whether Whites are systemically given higher scores for loyalty, work ethic, intelligence, and leadership, as well as lower scores for greed (in OOTP, a low greed score is more desirable). Below, the $p$-value gives the probability of seeing a difference in means that's at least as large as the observed difference: the lower the $p$-value, the more statistically significant the difference. For all traits but greed, the $p$-value is extremely small. It's almost impossible for the observed discrepancies to have come about by chance.
+
+```{r t_test}
+# Flip greed to make higher scores better:
+for (trait in c("greed", "loyalty", "work_ethic", "intelligence", "leader")) {
+  alternative <- ifelse(trait == "greed", "less", "greater")
+  test <- t.test(players %>% filter(facial_type == "white") %>% pull(trait),
+                 players %>% filter(facial_type != "white") %>% pull(trait),
+                 alternative = alternative)
+  cat("Trait:           ", trait, "\n")
+  cat("Mean (white):    ", test$estimate[1], "\n")
+  cat("Mean (non-white):", test$estimate[2], "\n")
+  cat("t-test p-value:  ", test$p.value, "\n\n")
+}
+```
+
+
+## Solutions
+
+The easiest way to fix this problem is to just randomly generate scores for all personality traits. 
+
+A second method shifts and scales within each racial group so that means and standard deviations are identical within groups. This method isn't perfect. For example, we still get a disproportionate number of Whites who are exceptionally intelligent:
+
+```{r intel_adjust}
+intel_summary <- players %>%
+  group_by(facial_type) %>%
+  summarise(intel_mean = mean(intelligence), intel_sd = sd(intelligence))
+
+players <- players %>% 
+  left_join(intel_summary, by = "facial_type") %>%
+  mutate(adj_intelligence = 100 + 19 * (intelligence - intel_mean) / intel_sd) 
+
+ggplot(players, aes(x = adj_intelligence, col = facial_type)) + geom_density()
+```
+
+A third method assigns scores based on empirical quantiles so that not only means and standard deviations are the same, but entire distributions. Here I match the empirical quantiles with normal distributions, but any distribution would do. Here's how the scores adjusted using this method compare to the original scores:
+
+```{r adj2}
+players <- players %>% 
+  group_by(facial_type) %>%
+  mutate(adj_intelligence = qnorm(rank(intelligence) / (n() + 1), mean = 100, sd = 20))
+
+ggplot(players, aes(x = intelligence, y = adj_intelligence, col = facial_type)) + 
+  geom_point() +
+  geom_abline(slope = 1)
+```
+
+Using a normal distribution loses information at the extremes, so a heavier-tailed distribution like a $t$ might be preferred. Some trial and error is needed to get it right. A $t$ distribution with 10 degrees of freedom gives good results:
+
+```{r adj3}
+players <- players %>% 
+  group_by(facial_type) %>%
+  mutate(adj_intelligence = 100 + 20 * qt(rank(intelligence) / (n() + 1), df = 10))
+
+ggplot(players, aes(x = intelligence, y = adj_intelligence, col = facial_type)) + 
+  geom_point() +
+  geom_abline(slope = 1)
+```
